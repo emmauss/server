@@ -1,11 +1,11 @@
 import enum
-import gevent
 import arrow
+import gevent
 
 from contextlib import contextmanager
 from abc import ABCMeta, abstractmethod
 from inspect import isclass
-from concurrent import futures
+from gevent.threadpool import ThreadPool
 
 from happypanda.common import utils, hlogger, exceptions, constants
 from happypanda.core import plugins
@@ -61,18 +61,14 @@ class CommandFuture:
         if not self._value == self.NoValue:
             return self._value
         if block:
-            while True:
-                try:
-                    self._value = self._future.result(0)
-                    break
-                except futures.TimeoutError:
-                    utils.switch(constants.Priority.Low)
+            gevent.wait([self._future], timeout)
+            self._value = self._future.get()
         else:
-            self._value = self._future.get(0)  # TODO: return custom timeout exception
+            self._value = self._future.get(block, timeout)
         return self._value
 
     def kill(self):
-        pass
+        self._future.kill()
 
 
 def _daemon_greenlet():
@@ -84,21 +80,20 @@ def _native_runner(f):
 
     def cleanup_wrapper(*args, **kwargs):
         r = f(*args, **kwargs)
-        constants._db_scoped_sesion.remove()
+        constants._db_scoped_session.remove()
         return r
 
     def wrapper(*args, **kwargs):
-        d = gevent.spawn(_daemon_greenlet)  # this is to allow gevent switching to occur
-        g = gevent.spawn(cleanup_wrapper, *args, **kwargs)
-        r = g.get()
-        d.kill()
-        return r
+        # d = gevent.spawn(_daemon_greenlet)  # this is to allow gevent switching to occur
+        #g = gevent.spawn(cleanup_wrapper, *args, **kwargs)
+        #r = g.get()
+        # d.kill()
+        return cleanup_wrapper(*args, **kwargs)
     return wrapper
 
 
-class CoreCommand:
+class CoreCommand():
     "Base command"
-    __metaclass__ = ABCMeta
 
     _events = {}
     _entries = {}
@@ -115,22 +110,15 @@ class CoreCommand:
         self._started_time = None
         self._finished_time = None
         self._priority = priority
-        self._main = self.main
-        self.main = self._main_wrap
+        self._futures = []
 
     def run_native(self, f, *args, **kwargs):
-        # TODO: avoid deadlocks by only running if not in native thread already
-        return CommandFuture(self, self._native_pool.submit(_native_runner(f), *args, **kwargs))
+        f = CommandFuture(self, self._native_pool.apply_async(_native_runner(f), args, kwargs))
+        self._futures.append(f)
+        return f
 
-    def _main(self):
-        pass
-
-    def _main_wrap(self, *args, **kwargs):
-        utils.switch(self._priority)
-        self._started_time = arrow.now()
-        r = self._main(*args, **kwargs)
-        self._finished_time = arrow.now()
-        return r
+    def kill(self):
+        [f.kill() for f in self._futures]
 
     def _log_stats(self, d=None):
         create_delta = self._finished_time - self._created_time
@@ -142,10 +130,6 @@ class CoreCommand:
               "\t\tRunning delta: {} (time between start and finish)\n".format(run_delta),
               "\t\tLog delta: {} (time between finish and this log)\n".format(log_delta),
               )
-
-    @abstractmethod
-    def main(self, *args, **kwargs):
-        pass
 
     @classmethod
     def _get_commands(cls):
@@ -160,10 +144,12 @@ class CoreCommand:
                 cls._entries[a.name] = a
 
 
-class Command(CoreCommand):
+class Command(CoreCommand, metaclass=ABCMeta):
 
     def __init__(self, priority=constants.Priority.Normal):
         super().__init__(priority)
+        self._main = self.main
+        self.main = self._main_wrap
 
     def run(self, *args, **kwargs):
         """
@@ -171,6 +157,20 @@ class Command(CoreCommand):
         """
         log.d("Running command:", self.__class__.__name__)
         return self.main(*args, **kwargs)
+
+    def _main(self):
+        pass
+
+    def _main_wrap(self, *args, **kwargs):
+        utils.switch(self._priority)
+        self._started_time = arrow.now()
+        r = self._main(*args, **kwargs)
+        self._finished_time = arrow.now()
+        return r
+
+    @abstractmethod
+    def main(self, *args, **kwargs):
+        pass
 
 
 class UndoCommand(Command):
@@ -368,4 +368,4 @@ class CommandEntry(_CommandPlugin):
 
 
 def init_commands():
-    CoreCommand._native_pool = futures.ThreadPoolExecutor(constants.maximum_native_workers)
+    CoreCommand._native_pool = ThreadPool(constants.maximum_native_workers)

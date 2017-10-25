@@ -8,19 +8,19 @@ import os
 
 from datetime import datetime
 
-from happypanda.common import constants, exceptions, utils, hlogger
+from happypanda.common import constants, exceptions, utils, hlogger, config
 from happypanda.core import db
 from happypanda.core.commands import io_cmd
 
 log = hlogger.Logger(__name__)
 
 
-def finalize(msg_dict, session_id="", name=constants.server_name, error=None):
+def finalize(msg_dict, session_id="", name=None, error=None):
     "Finalize dict message before sending"
     enc = 'utf-8'
     msg = {
         'session': session_id,
-        'name': name,
+        'name': name if name else config.server_name.value,
         'data': msg_dict,
     }
 
@@ -53,7 +53,7 @@ class CoreMessage:
         "Serialize to JSON structure"
         d = self.data()
         assert isinstance(
-            d, (dict, list)), "self.data() must return a dict or list!"
+            d, (dict, list)) or isinstance(self, Message), "self.data() must return a dict or list!"
         if self._error:
             d[self._error.key] = self._error.data()
         if include_key:
@@ -61,7 +61,7 @@ class CoreMessage:
         else:
             return d
 
-    def serialize(self, session_id="", name=constants.server_name):
+    def serialize(self, session_id="", name=None):
         "Serialize this object to bytes"
         return finalize(self.json_friendly(), session_id, name)
 
@@ -112,7 +112,7 @@ class List(CoreMessage):
     def from_json(self, j):
         return super().from_json(j)
 
-    def serialize(self, session_id="", name=constants.server_name, include_key=False):
+    def serialize(self, session_id="", name=None, include_key=False):
         "Serialize this object to bytes"
         d = self.json_friendly(include_key)
         return finalize(d, session_id, name)
@@ -212,7 +212,7 @@ class DatabaseMessage(CoreMessage):
             session_id="",
             load_values=False,
             load_collections=False,
-            name=constants.server_name):
+            name=None):
         """Serialize this object to bytes
                 Params:
             load_values -- Queries database for unloaded values
@@ -287,7 +287,7 @@ class DatabaseMessage(CoreMessage):
         elif isinstance(attrib, arrow.Arrow):
             return attrib.timestamp
 
-        elif isinstance(attrib, (bool, int, str, dict)):
+        elif isinstance(attrib, (bool, int, float, str, dict)):
             return attrib
         else:
             raise NotImplementedError(

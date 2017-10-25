@@ -1,3 +1,9 @@
+"""
+Database
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+"""
+
 from happypanda.common import constants, utils, exceptions
 from happypanda.core import db, services, message
 from happypanda.interface import enums
@@ -14,8 +20,7 @@ def get_image(item_type: enums.ItemType=enums.ItemType.Gallery,
               item_ids: list=[],
               size: enums.ImageSize=enums.ImageSize.Medium,
               url: bool=False,
-              uri: bool=False,
-              ctx=None):
+              uri: bool=False):
     """
     Get image for item.
     Image content is base64 encoded.
@@ -29,11 +34,12 @@ def get_image(item_type: enums.ItemType=enums.ItemType.Gallery,
         uri: turn raw base64 string into an URI
 
     Returns:
-        ```
-        { item_id : async_command_id }
-        ```
+        .. code-block:: guess
+
+            {
+                item_id : async_command_id
+            }
     """
-    utils.require_context(ctx)
 
     item_type = enums.ItemType.get(item_type)
     size = enums.ImageSize.get(size)
@@ -90,7 +96,12 @@ def get_items(item_type: enums.ItemType=enums.ItemType.Gallery,
         limit: limit the amount of items returned
 
     Returns:
-        list of item message objects
+        .. code-block:: guess
+
+            [
+                item message object,
+                ...
+            ]
     """
 
     item_type = enums.ItemType.get(item_type)
@@ -118,7 +129,12 @@ def get_related_items(item_type: enums.ItemType=enums.ItemType.Gallery,
         limit: limit the amount of items returned
 
     Returns:
-        a list of related item message object
+        .. code-block:: guess
+
+            [
+                related item message object,
+                ...
+            ]
     """
     item_type = enums.ItemType.get(item_type)
     related_type = enums.ItemType.get(related_type)
@@ -151,9 +167,11 @@ def get_count(item_type: enums.ItemType=enums.ItemType.Gallery):
         item_type: type of item
 
     Returns:
-        ```
-        { 'count': int }
-        ```
+        .. code-block:: guess
+
+            {
+                'count' : int
+            }
     """
 
     item_type = enums.ItemType.get(item_type)
@@ -177,9 +195,12 @@ def get_related_count(item_type: enums.ItemType=enums.ItemType.Gallery,
         related_type: child item
 
     Returns:
-        ```
-        { 'id': int, 'count': int }
-        ```
+        .. code-block:: guess
+
+            {
+                'id' : int
+                'count' : int
+            }
     """
     item_type = enums.ItemType.get(item_type)
     related_type = enums.ItemType.get(related_type)

@@ -14,10 +14,31 @@ def set_key(e):
     this.props.on_change(this.props.idx, (e.target.value, this.state['value']))
 
 def get_type(s):
-    if s[0] in ("'", '"') and s[len(s) - 1] in ("'", '"'):
+    s = s.strip()
+    if s.startswith("{") and s.endswith("}"):
+        s = s[1:-1]
+        d = {}
+        kv = []
+        sp = s.split(':')
+        for v in sp:
+            if len(kv) == 2:
+                d[kv[0]] = kv[1]
+                kv.clear()
+            kv.append(get_type(v))
+
+        if len(kv) == 2:
+            d[kv[0]] = kv[1]
+        return d
+
+    # starwith and endswith doesn't work with tuple, transcrypt fault
+    elif s[0] in ("'", '"') and s[len(s) - 1] in ("'", '"'):
         return s[1:-1]
     elif s.lower() in ('none', 'null'):
         return None
+    elif s.lower() == "true":
+        return True
+    elif s.lower() == "false":
+        return False
     else:
         try:
             return int(s)
@@ -68,7 +89,7 @@ def handle_submit(ev):
 
     serv_data.update(this.state['kwargs'])
     msg = client.call(ServerMsg([serv_data], serv_rsponse, contextobj=this))
-    this.props.to_server(utils.syntax_highlight(JSON.stringify(msg._msg, None, 4)))
+    this.props.to_server(utils.syntax_highlight(JSON.stringify(msg._msg['msg'], None, 4)))
 
 __pragma__("jsiter")
 def set_kwargs(i, v):
@@ -125,22 +146,25 @@ Page = createReactClass({
         "to_server":"",
         "from_server":"",},
 
+    'componentWillMount': lambda: this.props.menu(None),
+
     'set_msg_to': lambda msg: this.setState({'to_server':msg}),
     'set_msg_from': lambda msg: this.setState({'from_server':msg}),
 
     'render': lambda: e(ui.Container, e(ui.Grid.Column,
                         e(ui.Message,
                           e(ui.Message.Header, tr(this, "ui.h-server-comm", "Server Communication")),
-                          h("p", tr(this, "ui.t-server-comm-tutorial", "..."))
+                          h(ui.Message.Content, tr(this, "ui.t-server-comm-tutorial", "..."), as_="pre"),
+                          info=True,
                           ),
                         e(ui.Divider),
                         e(ApiForm, to_server=this.set_msg_to, from_server=this.set_msg_from),
                         e(ui.Divider),
                         e(ui.Accordion,
-                          e(ui.Accordion.Title, e(ui.Icon, js_name="dropdown"), tr(this, "", "Message")),
-                          e(ui.Accordion.Content, e(ui.Message, formatted_json(this.state['to_server']), as_="pre")),
-                          e(ui.Accordion.Title, e(ui.Icon, js_name="dropdown"), tr(this, "", "Response")),
-                          e(ui.Accordion.Content, e(ui.Message, formatted_json(this.state['from_server']), as_="pre")),
+                          panels=[
+                              {'key':0, 'title':tr(this, "", "Message"), 'content':e(ui.Message, formatted_json(this.state['to_server']), className="overflow-auto")},
+                              {'key':1, 'title':tr(this, "", "Response"), 'content':e(ui.Message, formatted_json(this.state['from_server']), className="overflow-auto")},
+                              ],
                           exclusive=False,
                           defaultActiveIndex=[0, 1]
                           )

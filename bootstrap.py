@@ -6,8 +6,16 @@ from subprocess import run
 from importlib import reload
 
 dev_options = dict(
-    build_db = False,
+    build_db = 103,
+    prev_build = None,
+    env_activated = False
     )
+
+changes = """
+- fix not checking for file existence on thumb generation
+- misc fixes
+"""
+
 
 def question(question, default="yes"):
     """Ask a yes/no question via raw_input() and return their answer.
@@ -64,41 +72,43 @@ def is_installed(cmd):
 
 def build(args):
     _activate_venv()
-    _update_pip(args)
 
-    if args.client:
+    if getattr(args, 'client', False):
         try:
             import build_webclient
         except ImportError:
             print("Please supply the '--dev' argument if you want to build the webclient")
+            sys.exit()
 
         print("Building webclient")
         build_webclient.main()
 
-    if args.docs:
+    if getattr(args, 'docs', False):
         try:
-            import build_webclient
+            import build_docs
         except ImportError:
             print("Please supply the '--dev' argument if you want to build the docs")
+            sys.exit()
 
         print("Building docs")
         build_docs.main()
 
-    if dev_options['build_db']:
-        print("\n# IMPORTANT # A database rebuild is required for this build, please use the accompanying script 'HPtoHPX.py' to rebuild your database if you've just updated")
+    print("\nLast build requiring db rebuild: {}\n Please use the accompanying script 'HPtoHPX.py' to rebuild your database if you've surpassed this build".format(dev_options['build_db']))
 
 def _activate_venv():
-    if not os.path.exists('env'):
-        print("Looks like you haven't installed HPX yet. Please run '$ python bootstrap.py install' to install")
+    if not dev_options['env_activated']:
+        if not os.path.exists('env'):
+            print("Looks like you haven't installed HPX yet. Please run '$ python bootstrap.py install' to install")
 
-    scripts = os.path.join("env", "Scripts")
-    if not os.path.exists(scripts):
-        scripts = os.path.join("env", "bin")
+        scripts = os.path.join("env", "Scripts")
+        if not os.path.exists(scripts):
+            scripts = os.path.join("env", "bin")
 
-    print("Activating virtualenv")
-    activator = os.path.join(scripts, "activate_this.py")
-    with open(activator) as f:
-        exec(f.read(), {'__file__': activator})
+        print("Activating virtualenv")
+        activator = os.path.join(scripts, "activate_this.py")
+        with open(activator) as f:
+            exec(f.read(), {'__file__': activator})
+        dev_options['env_activated'] = True
 
 def _check_python():
     _cmd = "python3"
@@ -121,10 +131,17 @@ def _check_pip():
         print("Seems like pip is not installed. Please install pip to continue")
         sys.exit()
 
-def _update_pip(args):
+def _update_pip(args, skip=True):
+    if not args.dev and skip:
+        try:
+            from happypanda import main
+            return
+        except ImportError:
+            pass
     print("Installing required packages...")
     r = "requirements.txt" if not args.dev else "requirements-dev.txt"
-    run(["pip3", "install", "-r", r, "--upgrade"])
+    env_p = r".\env\Scripts\pip3" if sys.platform.startswith("win") else "./env/bin/pip3"
+    run([env_p, "install", "-r", r])
 
 def install(args):
     print("Installing HPX...")
@@ -157,19 +174,118 @@ def install(args):
         build(args)
 
 def update(args):
-    cmd = is_installed("git")
-    if not os.path.exists(".git"):
-        if not question("Looks like we're not connected to the main repo. Do you want me to set it up for you?"):
-            sys.exit()
-        print("Setting up git repo...")
-        run([cmd, "init", "."])
-        run([cmd, "remote", "add", "-f", "origin", "https://github.com/happypandax/server.git"])
-        b = "dev" if args.dev else "master"
+    if args.packages:
+        _activate_venv()
+        _update_pip(args, False)
+    else:
+        cmd = is_installed("git")
+        if not os.path.exists(".git"):
+            if not question("Looks like we're not connected to the main repo. Do you want me to set it up for you?"):
+                sys.exit()
+            print("Setting up git repo...")
+            run([cmd, "init", "."])
+            run([cmd, "remote", "add", "-f", "origin", "https://github.com/happypandax/server.git"])
+        b = "dev"
         run([cmd, "checkout", b, "-f"])
 
-    print("Pulling changes...")
-    run([cmd, "pull"])
-    build(args)
+        _activate_venv()
+        from happypanda.common import constants
+        dev_options['prev_build'] = constants.build
+        print("Pulling changes...")
+        run([cmd, "pull"])
+        constants = reload(constants)
+        build(args)
+        version(args)
+
+def version(args):
+    _activate_venv()
+    from happypanda.common import constants
+    print("\n-----------------------------------------------\n")
+    if dev_options['prev_build']:
+        print("Build: {} -> {}".format(dev_options['prev_build'], constants.build))
+    else:
+        print("Build: {}".format(constants.build))
+
+    print("\n------------------- Changes -------------------")
+    print(changes)
+    print("\nLast build requiring db rebuild: {}\n Please use the accompanying script 'HPtoHPX.py' to rebuild your database if you've surpassed this build".format(dev_options['build_db']))
+
+
+def convert(args):
+    _activate_venv()
+    print("Convert HP database to HPX database")
+    try:
+        from HPtoHPX import main
+    except ImportError:
+        _update_pip(args)
+    env_p = r".\env\Scripts\python" if sys.platform.startswith("win") else "./env/bin/python"
+    argv = []
+    argv.append(args.db_path)
+    data_folder = "data"
+    if not os.path.isdir(data_folder):
+        os.makedirs(data_folder)
+    argv.append(os.path.join("data", "happypanda_dev.db" if args.dev else "happypanda.db"))
+    argv.extend(sys.argv[3:])
+    for i in ("-d", "--dev"):
+        try:
+            argv.remove(i)
+        except ValueError:
+            pass
+    return run([env_p, "HPtoHPX.py", *argv]).returncode
+
+
+def is_sane_database(Base, session):
+    """Check whether the current database matches the models declared in model base.
+    Currently we check that all tables exist with all columns. What is not checked
+    * Column types are not verified
+    * Relationships are not verified at all (TODO)
+    :param Base: Declarative Base for SQLAlchemy models to check
+    :param session: SQLAlchemy session bound to an engine
+    :return: True if all declared models have corresponding tables and columns.
+    """
+
+    engine = session.get_bind()
+    iengine = inspect(engine)
+
+    errors = False
+
+    tables = iengine.get_table_names()
+
+    # Go through all SQLAlchemy models
+    for name, klass in Base._decl_class_registry.items():
+
+        if isinstance(klass, _ModuleMarker):
+            # Not a model
+            continue
+
+        table = klass.__tablename__
+        if table in tables:
+            # Check all columns are found
+            # Looks like [{'default': "nextval('sanity_check_test_id_seq'::regclass)", 'autoincrement': True, 'nullable': False, 'type': INTEGER(), 'name': 'id'}]
+
+            columns = [c["name"] for c in iengine.get_columns(table)]
+            mapper = inspect(klass)
+
+            for column_prop in mapper.attrs:
+                if isinstance(column_prop, RelationshipProperty):
+                    # TODO: Add sanity checks for relations
+                    pass
+                else:
+                    for column in column_prop.columns:
+                        # Assume normal flat column
+                        if not column.key in columns:
+                            logger.error("Model %s declares column %s which does not exist in database %s", klass, column.key, engine)
+                            errors = True
+        else:
+            logger.error("Model %s declares table %s which does not exist in database %s", klass, table, engine)
+            errors = True
+
+    return not errors
+
+def _check_db(args):
+    from sqlalchemy import inspect
+    from sqlalchemy.ext.declarative.clsregistry import _ModuleMarker
+    from sqlalchemy.orm import RelationshipProperty
 
 def start(args):
     _activate_venv()
@@ -177,8 +293,8 @@ def start(args):
         from happypanda import main
     except ImportError:
         _update_pip(args)
-    env_p = r".\env\Scripts\python" if sys.platform.startswith("win") else "env/bin/python"
-    return run([env_p, "run.py", *sys.argv[2:]], shell=True).returncode
+    env_p = r".\env\Scripts\python" if sys.platform.startswith("win") else "./env/bin/python"
+    return run([env_p, "run.py", *sys.argv[2:]]).returncode
 
 welcome_msg = """
 Welcome to HPX development helper script.
@@ -188,13 +304,16 @@ If this is your first time running this script, or if you haven't installed HPX 
 HPX requires Python 3.5 and optionally npm to build the webclient and git to fetch new changes.
 Make sure those are installed before running the command above.
 
-You can now start HPX by running:
+As of now HPX does not implement any write features, and so you need a HP database to use HPX:
+    $ python3 bootstrap.py convert <path-to-old-HP-db>
+
+You can now start HPX by running (additional arguments will be forwarded):
     $ python3 bootstrap.py run
 
 You only need to install once. After installing, you can update HPX after pulling the new changes from the git repo by running:
     $ python3 bootstrap.py build
 
-To automatically pull the changes and build for you, just run:
+Or, to automatically pull the changes and build for you, just run (make sure you have git installed):
     $ python3 bootstrap.py update
 
 Finally, each action may have additional optional arguments. Make sure to check them out by supplying "--help" after the action:
@@ -229,6 +348,16 @@ def main():
 
     subparser = subparsers.add_parser('update', help='Fetch the latest changes from the GitHub repo')
     subparser.set_defaults(func=update)
+    subparser.add_argument('-p', '--packages', action='store_true', help="Update pip packages")
+    subparser.add_argument('-d', '--dev', action='store_true', help="Update pip packages from `requirements-dev.txt`")
+
+    subparser = subparsers.add_parser('convert', help='Convert HP database to HPX database, additional args will be passed to `HPtoHPX.py`')
+    subparser.add_argument('db_path', help="Path to old HP database file")
+    subparser.add_argument('-d', '--dev', action='store_true', help="Convert to ´happypanda_dev.db´ instead")
+    subparser.set_defaults(func=convert)
+
+    subparser = subparsers.add_parser('version', help='Display build number and latest changes')
+    subparser.set_defaults(func=version)
 
     subparser = subparsers.add_parser('run', help='Start HPX, additional args will be passed to HPX')
     subparser.set_defaults(func=start)
@@ -236,7 +365,7 @@ def main():
     subparser = subparsers.add_parser('help', help='Help')
     subparser.set_defaults(func=lambda a: parser.print_help())
 
-    if 'run' in sys.argv:
+    if 'run' in sys.argv or 'convert' in sys.argv:
         args, unknown = parser.parse_known_args()
     else:
         args = parser.parse_args()

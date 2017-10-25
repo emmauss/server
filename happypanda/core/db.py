@@ -193,6 +193,47 @@ class Password(TypeDecorator):
                 'Cannot convert {} to a PasswordHash'.format(type(value)))
 
 
+def _unique(session, cls, hashfunc, queryfunc, constructor, arg, kw):
+    cache = getattr(session, '_unique_cache', None)
+    if cache is None:
+        session._unique_cache = cache = {}
+
+    key = (cls, hashfunc(*arg, **kw))
+    if key in cache:
+        return cache[key]
+    else:
+        with session.no_autoflush:
+            q = session.query(cls)
+            q = queryfunc(q, *arg, **kw)
+            obj = q.first()
+            if not obj:
+                obj = constructor(*arg, **kw)
+                session.add(obj)
+        cache[key] = obj
+        return obj
+
+
+class UniqueMixin:
+    @classmethod
+    def unique_hash(cls, *arg, **kw):
+        raise NotImplementedError()
+
+    @classmethod
+    def unique_filter(cls, query, *arg, **kw):
+        raise NotImplementedError()
+
+    @classmethod
+    def as_unique(cls, *arg, **kw):
+        return _unique(
+            constants.db_session(),
+            cls,
+            cls.unique_hash,
+            cls.unique_filter,
+            cls,
+            arg, kw
+        )
+
+
 class BaseID:
     id = Column(Integer, primary_key=True)
     properties = Column(JSONType, nullable=False, default={})
@@ -205,8 +246,16 @@ class BaseID:
         return sess
 
 
-class NameMixin:
+class NameMixin(UniqueMixin):
     name = Column(String, nullable=False, default='', unique=True)
+
+    @classmethod
+    def unique_hash(cls, name):
+        return name
+
+    @classmethod
+    def unique_filter(cls, query, name):
+        return query.filter(cls.name == name)
 
     def exists(self, obj=False, strict=False):
         "obj: queries for the full object and returns it"
@@ -890,7 +939,7 @@ class Gallery(TaggableMixin, ProfileMixin, Base):
         "Artist",
         secondary=gallery_artists,
         back_populates='galleries',
-        lazy="dynamic",
+        lazy="joined",
         cascade="save-update, merge, refresh-expire")
     filters = relationship(
         "GalleryFilter",
@@ -1315,13 +1364,17 @@ def _get_session(sess):
 
 
 def init(**kwargs):
-    db_path = constants.db_path_dev if constants.dev else constants.db_path
+    db_path = kwargs.get("path")
+    if not db_path:
+        db_path = constants.db_path_dev if constants.dev else constants.db_path
     Session = scoped_session(sessionmaker(), scopefunc=gevent.getcurrent)
-    constants._db_scoped_sesion = Session
+    constants._db_scoped_session = Session
     constants.db_session = functools.partial(_get_session, Session)
     initEvents(Session)
-    constants.db_engine = create_engine(os.path.join("sqlite:///", db_path),
-                                        connect_args={'timeout': 60})  # SQLITE specific arg (avoding db is locked errors)
+    constants.db_engine = kwargs.get("engine")
+    if not constants.db_engine:
+        constants.db_engine = create_engine(os.path.join("sqlite:///", db_path),
+                                            connect_args={'timeout': 60 * 5})  # SQLITE specific arg (avoding db is locked errors)
     Base.metadata.create_all(constants.db_engine)
 
     Session.configure(bind=constants.db_engine)

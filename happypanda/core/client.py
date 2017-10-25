@@ -2,7 +2,7 @@ import socket
 import sys
 import json
 
-from happypanda.common import constants, exceptions, utils, hlogger
+from happypanda.common import constants, exceptions, utils, hlogger, config
 from happypanda.core import message
 
 log = hlogger.Logger(__name__)
@@ -18,7 +18,11 @@ class Client:
     def __init__(self, name, session_id="", client_id=""):
         self.id = client_id
         self.name = name
-        self._server = (constants.host, constants.port)
+        # HACK: properly fix this
+        host = config.host.value
+        if isinstance(host, str):
+            host = "localhost" if host.lower() == "0.0.0.0" else host
+        self._server = (host, config.port.value)
         self._sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self._alive = False
         self._buffer = b''
@@ -34,16 +38,17 @@ class Client:
         "Check if connection with the server is still alive"
         return self._alive
 
-    def _handshake(self, data, user=None, password=None):
+    def _handshake(self, data, user=None, password=None, ignore_err=False):
         "Shake hands with server"
-        serv_error = data.get('error')
-        if serv_error:
-            raise exceptions.AuthError(utils.this_function(), serv_error)
+        if not ignore_err:
+            serv_error = data.get('error')
+            if serv_error:
+                raise exceptions.AuthError(utils.this_function(), serv_error)
         serv_data = data.get('data')
         if serv_data == "Authenticated":
             self.session = data.get('session')
             self._accepted = True
-        elif serv_data:
+        elif serv_data and "version" in serv_data:
             self._guest_allowed = serv_data.get('guest_allowed')
             self.version = serv_data.get('version')
             d = {}
@@ -55,7 +60,7 @@ class Client:
 
     def request_auth(self):
         self._handshake(self.communicate({'session': "", 'name': self.name,
-                                          'data': 'requestauth'}), self._last_user, self._last_pass)
+                                          'data': 'requestauth'}, True), self._last_user, self._last_pass)
 
     def connect(self, user=None, password=None):
         "Connect to the server"
@@ -63,7 +68,7 @@ class Client:
             self._last_user = user
             self._last_pass = password
             try:
-                log.i("Client connecting to server at: ({}:{})".format(constants.host, constants.port))
+                log.i("Client connecting to server at: {}".format(self._server))
                 self._sock.connect(self._server)
                 self._alive = True
                 if not self.session:
@@ -71,10 +76,8 @@ class Client:
                 else:
                     self._accepted = True
                     self._recv()
-            except OSError:
-                log.exception()
-                self.request_auth()
             except socket.error:
+                self.session = ""
                 raise exceptions.ClientError(
                     self.name, "Failed to establish server connection")
 
@@ -82,6 +85,8 @@ class Client:
         """
         Send bytes to server
         """
+        if not self._alive:
+            raise exceptions.ClientError(self.name, "Client is not connected to server")
         log.d(
             "Sending",
             sys.getsizeof(msg_bytes),
@@ -89,14 +94,8 @@ class Client:
             self._server)
         try:
             self._sock.sendall(msg_bytes)
-        except (ConnectionResetError, ConnectionAbortedError):
-            try:
-                self.connect(self._last_user, self._last_pass)
-                self._sock.sendall(msg_bytes)
-            except socket.error:
-                self._alive = False
-                raise exceptions.ServerDisconnectError(
-                    self.name, "Server is not connected")
+        except ConnectionError:
+            self.session = ""
         self._sock.sendall(constants.postfix)
 
     def _recv(self):
@@ -108,6 +107,7 @@ class Client:
                 temp = self._sock.recv(constants.data_size)
                 if not temp:
                     self._alive = False
+                    self.session = ""
                     raise exceptions.ServerDisconnectError(
                         self.name, "Server disconnected")
                 self._buffer += temp
@@ -124,9 +124,10 @@ class Client:
         except socket.error as e:
             # log disconnect
             self.alive = False
+            self.session = ""
             raise exceptions.ServerError(self.name, "{}".format(e))
 
-    def communicate(self, msg):
+    def communicate(self, msg, auth=False):
         """Send and receive data with server
 
         params:
@@ -134,8 +135,8 @@ class Client:
         returns:
             dict from server
         """
-        if not self._accepted:
-            raise exceptions.AuthError(utils.this_function(), "")
+        if self.alive and not self._accepted and not auth:
+            raise exceptions.AuthError(utils.this_function(), "Client is connected but not authenticated")
         self._send(bytes(json.dumps(msg), 'utf-8'))
         return self._recv()
 

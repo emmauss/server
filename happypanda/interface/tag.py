@@ -1,3 +1,9 @@
+"""
+Tags
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+"""
+
 from happypanda.core import db, message
 from happypanda.interface import enums
 from happypanda.core.commands import database_cmd
@@ -17,9 +23,12 @@ def get_tags(item_type: enums.ItemType = enums.ItemType.Gallery,
             (this only makes sense when ItemType is :attr:`.ItemType.Gallery`)
 
     Returns:
-        ```
-        { namespace : list of tag message objects }
-        ```
+        .. code-block:: guess
+
+            {
+                namespace : [ tag message object, ...],
+                ...
+            }
     """
 
     item_type = enums.ItemType.get(item_type)

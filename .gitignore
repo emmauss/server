@@ -212,3 +212,5 @@ FakesAssemblies/
 *.dot
 *.db-wal
 *.db-shm
+/config.yaml
+/logs

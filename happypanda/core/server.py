@@ -3,8 +3,10 @@ import sys  # noqa: E402
 import code  # noqa: E402
 import arrow  # noqa: E402
 import os  # noqa: E402
+import gevent
+import weakref
 
-from inspect import getmembers, isfunction  # noqa: E402
+from inspect import getmembers, isfunction, signature, Parameter  # noqa: E402
 
 from gevent import socket, pool  # noqa: E402
 from gevent.server import StreamServer  # noqa: E402
@@ -12,7 +14,7 @@ from flask import Flask  # noqa: E402
 from flask_socketio import SocketIO  # noqa: E402
 
 from happypanda import interface  # noqa: E402
-from happypanda.common import constants, exceptions, utils, hlogger  # noqa: E402
+from happypanda.common import constants, exceptions, utils, hlogger, config  # noqa: E402
 from happypanda.core import db, torrent, message  # noqa: E402, F401
 from happypanda.interface import meta, enums  # noqa: E402
 
@@ -50,7 +52,7 @@ class Session:
 
     def extend(self):
         "Extend the life of this session"
-        self._expiration = arrow.utcnow().replace(minutes=+constants.session_span)
+        self._expiration = arrow.utcnow().replace(minutes=+config.session_span.value)
 
     @classmethod
     def get(cls, s_id):
@@ -73,7 +75,7 @@ class ClientHandler:
         self._port = self._address[1]
         self._stopped = False
         self._accepted = False
-        self.context = None
+        self.context = utils.get_context(None).setdefault("ctx", {})
         self.session = None
         self.handshake()
 
@@ -96,13 +98,13 @@ class ClientHandler:
         else:
             log.d("Client did not provide credentials")
 
-            if not constants.disable_default_user:
+            if not config.disable_default_user.value:
                 log.d("Authenticating with default user")
                 user_obj = s.query(
                     db.User).filter(
                     db.User.role == db.User.Role.default).one()
             else:
-                if not constants.allow_guests:
+                if not config.allow_guests.value:
                     log.d("Guests are disallowed on this server")
                     raise exceptions.AuthRequiredError(utils.this_function())
                 log.d("Authencticating as guest")
@@ -115,13 +117,13 @@ class ClientHandler:
                     user_obj = db.User(role=db.User.Role.guest)
                     s.add(user_obj)
 
-        self.context = user_obj
+        self.context['user'] = user_obj
 
-        self.context.address = self._ip
-        if not self.context.context_id:
-            self.context.context_id = uuid.uuid4().hex
+        self.context['adresss'] = self._ip
+        if not self.context['user'].context_id:
+            self.context['user'].context_id = uuid.uuid4().hex
 
-        self.context.config = None
+        self.context['config'] = {}
         log.d("Client accepted")
         self._accepted = True
 
@@ -153,7 +155,7 @@ class ClientHandler:
         Params:
             data -- data from client
         Returns:
-            list of (function, function_kwargs, context_neccesity)
+            list of (function, function_kwargs)
         """
         where = "Message parsing"
         log.d("Parsing incoming data")
@@ -203,8 +205,7 @@ class ClientHandler:
                     func_failed = False
                     func_args = tuple(
                         arg for arg in f if arg not in function_keys)
-                    func_varnames = self.api[function_name].__code__.co_varnames
-                    need_ctx = 'ctx' in func_varnames
+                    func_varnames = signature(self.api[function_name]).parameters
                     for arg in func_args:
                         if arg not in func_varnames:
                             e = exceptions.InvalidMessage(
@@ -213,12 +214,20 @@ class ClientHandler:
                             self.errors.append((function_name, e))
                             func_failed = True
                             break
+
+                    for arg, def_val in func_varnames.items():
+                        if def_val.default is Parameter.empty and arg not in func_args:
+                            e = exceptions.InvalidMessage(
+                                where, "Missing a required argument in function '{}': '{}'".format(
+                                    function_name, arg))
+                            self.errors.append((function_name, e))
+                            func_failed = True
+
                     if func_failed:
                         continue
 
                     function_tuples.append(
-                        (self.api[function_name], {
-                            x: f[x] for x in func_args}, need_ctx))
+                        (self.api[function_name], {x: f[x] for x in func_args}))
                 except exceptions.ServerError as e:
                     self.errors.append((function_name, e))
 
@@ -270,21 +279,22 @@ class ClientHandler:
                 if self.session.id in self.contexts:
                     self._accepted = True
                     self.context = self.contexts[self.session.id]
+                    utils.get_context(None)['ctx'] = self.context
                     self.session.extend()
                     return
 
         log.d("Authentication with session failed", session_id)
         self._accepted = False
 
-    def handshake(self, data=None):
+    def handshake(self, payload=None):
         """
         Sends a welcome message
         """
-        assert data is None or isinstance(data, dict)
-        if isinstance(data, dict):
+        assert payload is None or isinstance(payload, dict)
+        if isinstance(payload, dict):
             log.d("Incoming handshake from client", self._address)
-            data = data.get("data")
-            if not constants.allow_guests:
+            data = payload.get("data")
+            if not config.allow_guests.value:
                 log.d("Guests are not allowed")
                 self._check_both(
                     utils.this_function(), "JSON dict", ('user', 'password'), data)
@@ -296,6 +306,7 @@ class ClientHandler:
                 p = data.pop('password', None)
 
             self.get_context(u, p)
+            self.context['name'] = payload['name']
             self.session = Session()
             self.contexts[self.session.id] = self.context
             self.send(message.finalize("Authenticated", session_id=self.session.id))
@@ -303,7 +314,7 @@ class ClientHandler:
             log.d("Handshaking client:", self._address)
             msg = dict(
                 version=meta.get_version().data(),
-                guest_allowed=constants.allow_guests,
+                guest_allowed=config.allow_guests.value,
             )
 
             self.send(message.finalize(msg))
@@ -325,14 +336,12 @@ class ClientHandler:
                         self.handshake()
                     return functions
 
-                for func, func_args, ctx in functions:
+                for func, func_args in functions:
                     log.d("Calling function", func, "with args", func_args)
                     func_msg = message.Function(func.__name__)
                     try:
-                        if ctx:
-                            func_args['ctx'] = self.context
                         msg = func(**func_args)
-                        assert isinstance(msg, message.CoreMessage) or None
+                        assert isinstance(msg, message.CoreMessage) or msg is None
                         func_msg.set_data(msg)
                     except exceptions.CoreError as e:
                         func_msg.set_error(message.Error(e.code, e.msg))
@@ -353,7 +362,7 @@ class ClientHandler:
             log.d("Sending exception to client:", e)
             self.on_error(e)
 
-        except BaseException:
+        except Exception:
             if not constants.dev:
                 log.exception("An unknown critical error has occurred")
                 self.on_error(exceptions.HappypandaError(
@@ -398,13 +407,39 @@ class ClientHandler:
         return None
 
 
+class Greenlet(gevent.Greenlet):
+    '''
+    A subclass of gevent.Greenlet which adds additional members:
+     - locals: a dict of variables that are local to the "spawn tree" of
+       greenlets
+     - spawner: a weak-reference back to the spawner of the
+       greenlet
+     - stacks: a record of the stack at which the greenlet was
+       spawned, and ancestors
+    '''
+
+    def __init__(self, f, *a, **kw):
+        super(Greenlet, self).__init__(f, *a, **kw)
+        spawner = self.spawn_parent = weakref.proxy(gevent.getcurrent())
+        if not hasattr(spawner, 'locals'):
+            spawner.locals = {}
+        self.locals = spawner.locals
+        stack = []
+        cur = sys._getframe()
+        while cur:
+            stack.extend((cur.f_code, cur.f_lineno))
+            cur = cur.f_back
+        self.stacks = (tuple(stack),) + getattr(spawner, 'stacks', ())[:10]
+
+
 class HPServer:
     "Happypanda Server"
 
     def __init__(self):
         params = utils.connection_params()
         self._pool = pool.Pool(
-            constants.allowed_clients if constants.allowed_clients else None)  # cannot be 0
+            config.allowed_clients.value if config.allowed_clients.value else None,
+            Greenlet)  # cannot be 0
         self._server = StreamServer(params, self._handle, spawn=self._pool)
         self._web_server = None
         self._clients = set()  # a set of client handlers
@@ -455,7 +490,7 @@ class HPServer:
             constants.server_started = True
             if blocking:
                 log.i("Starting server... ({}:{})".format(
-                    constants.host, constants.port), stdout=True)
+                    config.host.value, config.port.value), stdout=True)
                 self._server.serve_forever()
             else:
                 self._server.start()

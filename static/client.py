@@ -1,27 +1,53 @@
-from react_utils import (e,
-                        render,
-                        React,
-                        createReactClass)
+from state import state
 import utils
 
 io = require('socket.io-client')
 
-debug = True
+class ItemType:
+    #: Gallery
+    Gallery = 1
+    #: Collection
+    Collection = 2
+    #: GalleryFilter
+    GalleryFilter = 3
+    #: Page
+    Page = 4
+    #: Gallery Namespace
+    Grouping = 5
+    #: Gallery Title
+    Title = 6
+    #: Gallery Artist
+    Artist = 7
+    #: Category
+    Category = 8
+    #: Language
+    Language = 9
+    #: Status
+    Status = 10
+    #: Circle
+    Circle = 11
+    #: GalleryURL
+    GalleryUrl = 12
+    #: Gallery Parody
+    Parody = 13
 
-ItemType = {
-    'artist': 7,
-    'category': 8,
-    'circle': 11,
-    'collection': 2,
-    'gallery': 1,
-    'galleryfilter': 3,
-    'galleryurl': 12,
-    'grouping': 5,
-    'language':9,
-    'page':4,
-    'status':10,
-    'title': 6
-    }
+class ImageSize:
+    #: Original image size
+    Original = 1
+    #: Big image size
+    Big = 2
+    #: Medium image size
+    Medium = 3
+    #: Small image size
+    Small = 4
+
+class ViewType:
+    #: Library
+    Library = 1
+    #: Favourite
+    Favorite = 2
+    #: Inbox
+    Inbox = 3
 
 class Base:
 
@@ -32,27 +58,8 @@ class Base:
         pass
 
     def log(self, msg):
-        if debug:
+        if state.debug:
             print(msg)
-
-    def flash(self, msg, flash_type='danger', strong=""):
-        """
-        - info
-        - sucess
-        - warning
-        - danger
-        """
-        pass
-        #lbl = 'alert-' + flash_type
-        #obj = self.compile(
-        #    "#global-flash-t",
-        #    "#global-flash",
-        #    prepend=True,
-        #    alert=lbl,
-        #    strong=strong,
-        #    msg=msg)
-        #obj.delay(8000).fadeOut(500)
-
 
 class ServerMsg:
     msg_id = 0
@@ -88,6 +95,7 @@ class Client(Base):
         self.socket.on("server_call", self.on_server_call)
         self.socket.on("exception", self.on_error)
 
+
         self.commands = {
             'connect': 1,
             'reconnect': 2,
@@ -99,48 +107,89 @@ class Client(Base):
         self.namespace = namespace
         self.session = session
         self.name = "webclient"
+        self._reconnecting = False
         self._connection_status = True
         self._disconnected_once = False
         self._response_cb = {}
+        self._first_connect = True
         self._last_msg = None
-        self._msg_queue = []
         self._cmd_status = {}
         self._cmd_status_c = 0
+        self._retries = None
+        self._poll_interval = 5
+        self._poll_timeout = 1000*60*120
+        self._last_retry = __new__(Date()).getTime()
 
         if not self.polling:
-            utils.poll_func(self.connection, 3000000, 15000)
+            self.socket.on("connect", self.on_connect)
+            self.socket.on("disconnect", self.on_disconnect)
+            utils.poll_func(self.connection, self._poll_timeout, self._poll_interval*1000)
             Client.polling = True
     __pragma__('nokwargs')
 
+    def on_connect(self):
+        self.call_func("get_config", self._set_debug, cfg={'core.debug':False})
+        self.reconnect()
+
+    def on_disconnect(self):
+        self._connection_status = False
+        self._disconnected_once = True
+        state.app.notif("Disconnected from the server", "Server", "error")
+        for x in state.commands:
+            x.stop()
+
     def connection(self):
         self.send_command(self.commands['status'])
-        if not self._connection_status:
-            self.flash("Trying to establish server connection...", 'info')
-            self.send_command(self.commands['connect'])
+        if not self._connection_status and not self._reconnecting:
+            self.log("Starting reconnection")
+            utils.poll_func_stagger(self._reconnect, self._poll_timeout, self._poll_interval*1000)
+            self._reconnecting = True
         return False
+
+    __pragma__("tconv")
+    def _reconnect(self):
+        self.log("Reconnecting")
+        last_interval = 100
+        if self._retries is None:
+            self._retries = list(range(10, last_interval+10, 10)) # secs
+        i = self._retries.pop(0) if self._retries else last_interval
+        if self._connection_status:
+            i = 0
+        else:
+            self.reconnect(i)
+        return i * 1000
+    __pragma__("notconv")
+
+
+    __pragma__("kwargs")
+    def reconnect(self, interval = None):
+        state.app.notif("Trying to establish server connection{}".format(
+            ", trying again in {} seconds".format(interval) if interval else ""
+            ), "Server")
+        self.send_command(self.commands['connect'])
+    __pragma__("nokwargs")
 
     def send_command(self, cmd):
         assert cmd in self.commands.values(), "Not a valid command"
         self.socket.emit("command", {'command': cmd})
 
     def on_command(self, msg):
-        pass
-        #self._connection_status = msg['status']
-        #st_txt = "unknown"
-        #st_label = self.get_label("default")
-        #if self._connection_status:
-        #    if self._disconnected_once:
-        #        self._disconnected_once = False
-        #        self.flash("Connection to server has been established", 'success')
-        #    st_txt = "connected"
-        #    st_label = self.get_label("success")
-        #else:
-        #    self._disconnected_once = True
-        #    st_txt = "disconnected"
-        #    st_label = self.get_label("danger")
+        self._connection_status = msg['status']
+        st_txt = "unknown"
+        if self._connection_status:
+            if self._disconnected_once or self._first_connect:
+                self._disconnected_once = False
+                self._first_connect = False
+                state.app.notif("Connection to server has been established", "Server", 'success')
+            st_txt = "connected"
+            self._reconnecting = False
+            self._retries = None
+        else:
+            self._disconnected_once = True
+            st_txt = "disconnected"
 
     def on_error(self, msg):
-        self.flash(msg['error'], 'danger')
+        state.app.notif(msg['error'], "Server", "error")
 
     __pragma__('tconv')
     __pragma__('iconv')
@@ -155,15 +204,18 @@ class Client(Base):
                 self.log(msg)
             self.session = serv_data['session']
             if 'error' in serv_data:
-                #self.flash_error(serv_data['error'])
+                self.flash_error(serv_data['error'])
                 if serv_data['error']['code'] == 408:
                     self.send_command(self.commands['handshake'])
+            if serv_data['data'] == "Authenticated" and self._last_msg:
+                    self.socket.emit("server_call", self._last_msg)
+                    return
             if serv_msg.func_name and serv_data:
                 for func in serv_data.data:
                     err = None
                     if 'error' in func:
                         err = func['error']
-                        #self.flash_error(err)
+                        self.flash_error(err)
                     if func['fname'] == serv_msg.func_name:
                         if serv_msg.callback:
                             serv_msg.call_callback(func['data'], err)
@@ -176,7 +228,7 @@ class Client(Base):
 
     __pragma__('kwargs')
 
-    def call_func(self, func_name, callback, ctx=None, **kwargs):
+    def call_func(self, func_name, callback=None, ctx=None, **kwargs):
         "Call function on server. Calls callback with function data and error"
         f_dict = {
             'fname': func_name
@@ -201,10 +253,15 @@ class Client(Base):
         self._last_msg = final_msg
         if self._connection_status:
             self.socket.emit("server_call", final_msg)
-        else:
-            self._msg_queue.append(final_msg)
         servermsg._msg = final_msg
         return servermsg
+
+    def flash_error(self, err):
+        if err:
+            state.app.notif(err['msg'], "Server({})".format(err['code']), "error")
+
+    def _set_debug(self, data):
+        state.debug = data['core.debug']
 
 client = Client()
 thumbclient = Client(namespace="/thumb")
@@ -225,6 +282,7 @@ class Command(Base):
         self._values = {}
         self._value_callback = None
         self._getting_value = False
+        self._stopped = False
         self._on_each = False
         self._complete_callback = None
         self.commandclient = commandclient
@@ -250,10 +308,26 @@ class Command(Base):
     __pragma__('noiconv')
 
     __pragma__('iconv')
+    def stop(self, data=None, error=None):
+        "Stop command"
+        if data is not None and not error:
+            states = []
+            for i in self._command_ids:
+                str_i = str(i)
+                self._states[str_i] = data[str_i]
+        elif error:
+            pass
+        else:
+            self._stopped = True
+            self.commandclient.call_func("stop_command", self.stop, command_ids=self._command_ids)
+    __pragma__('noiconv')
 
+    __pragma__('iconv')
     __pragma__('kwargs')
     def finished(self, any_command=False):
         "Check if command has finished running"
+        if self._stopped:
+            return True
         states = []
         for s in self._states:
             states.append(self._states[s] in ['finished', 'stopped', 'failed'])
@@ -279,8 +353,12 @@ class Command(Base):
                         self._complete_callback()
 
                 self._fetch_value()
-                return self.finished()
+                f = self.finished()
+                if f:
+                    state.commands.remove(self)
+                return f
 
+            state.commands.add(self)
             utils.poll_func(_poll, timeout, interval)
         else:
             if self._complete_callback:
@@ -307,7 +385,7 @@ class Command(Base):
         elif error:
             pass
         else:
-            if self.finished(self._on_each) and not self._getting_value:
+            if self.finished(self._on_each) and not self._getting_value and not self._stopped:
                 if not cmd_ids:
                     cmd_ids = []
                     for i in self._command_ids:

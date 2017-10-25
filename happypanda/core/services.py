@@ -1,12 +1,12 @@
 import gevent
 import weakref
-import itertools
 import functools
+import itertools
 
 from gevent import pool, queue
 
-from happypanda.common import hlogger, constants
-from happypanda.core import command
+from happypanda.common import hlogger, constants, config
+from happypanda.core import command, async
 
 log = hlogger.Logger(__name__)
 
@@ -15,8 +15,8 @@ class Service:
 
     services = []
     generic = None
-    _id_counter = itertools.count(100)
     _all_commands = {}
+    _id_counter = itertools.count(100)
 
     def __init__(self, name, group=pool.Group()):
         self.name = name
@@ -65,7 +65,7 @@ class Service:
         assert isinstance(cmd_id, int)
         gevent.idle(constants.Priority.Normal.value)
         if cmd_id not in self._greenlets:
-            self._greenlets[cmd_id] = gevent.Greenlet(
+            self._greenlets[cmd_id] = async.Greenlet(
                 self._commands[cmd_id].main, *args, **kwargs)
 
         green = self._greenlets[cmd_id]
@@ -86,6 +86,7 @@ class Service:
         assert isinstance(cmd_id, int)
         gevent.idle(constants.Priority.Normal.value)
         if cmd_id in self._greenlets:
+            self._commands[cmd_id].kill()
             self._greenlets[cmd_id].kill()
 
     def get_command_value(self, cmd_id):
@@ -121,7 +122,8 @@ class Service:
             log.exception("Command", "{}({})".format(command_obj.__class__.__name__, command_id), "raised an exception")
             command_obj.state = command.CommandState.failed
             command_obj.exception = greenlet.exception
-
+            if constants.dev:
+                raise  # doesnt work
         if isinstance(greenlet.value, gevent.GreenletExit):
             command_obj.state = command.CommandState.stopped
             greenlet.value = None
@@ -170,7 +172,7 @@ class ImageService(Service):
     "An image service"
 
     def __init__(self, name):
-        super().__init__(name, pool.Pool(constants.concurrent_image_tasks))
+        super().__init__(name, pool.Pool(config.concurrent_image_tasks.value))
 
 
 def init_generic_services():

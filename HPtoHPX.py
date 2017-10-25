@@ -729,7 +729,7 @@ def process_pipes(out_queue, out_pipe):
         out_queue.put(out_pipe.recv())
 
 
-if __name__ == '__main__':
+def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('source',  help="Path to old HP database")
     parser.add_argument('destination',  help="Desired path new HPX database")
@@ -743,14 +743,20 @@ if __name__ == '__main__':
 
     src = args.source
     dst = args.destination
-    print("Source:", src)
-    print("Destination:", dst)
+    print("Source: ", src)
+    print("Destination: ", dst)
 
     if os.path.exists(dst):
         print("Warning: destination file already exists, you might want to delete")
 
     if args.skip_archive:
         print("Warning: pages for galleries in archives will not be generated")
+
+    if args.rar:
+        print("RARtool path: ", args.rar)
+
+    if args.process:
+        print("Process count: ", args.rar)
 
     print("Connecting to Happypanda database..")
     conn_src = sqlite3.connect(src)
@@ -764,8 +770,9 @@ if __name__ == '__main__':
     print("Creating new Happypanda X database")
     engine = db.create_engine(os.path.join("sqlite:///", dst))
     db.Base.metadata.create_all(engine)
-    sess = db.sessionmaker()
+    sess = db.scoped_session(db.sessionmaker())
     sess.configure(bind=engine)
+    constants.db_session = sess
     db.initEvents(sess)
     s = sess()
     db.init_defaults(s)
@@ -848,7 +855,7 @@ if __name__ == '__main__':
                     else:
                         dst_collections[col.name] = col
 
-                if gallery_ns:
+                if gallery_ns is not None:
                     gallery.grouping = gallery_ns
                 else:
                     gallery_ns = db.Grouping()
@@ -856,9 +863,9 @@ if __name__ == '__main__':
                     gallery_ns = dst_grouping.get(gallery_ns.name, gallery_ns)
                     dst_grouping[gallery_ns.name] = gallery_ns
                     gallery_ns.galleries.append(gallery)
-                    if g.status:
+                    if g.status and g.status.lower() != "unknown":
                         gstatus = db.Status()
-                        gstatus.name
+                        gstatus.name = g.status
                         gstatus = dst_status.get(gstatus.name, gstatus)
                         gallery_ns.status = gstatus
                         dst_status[gstatus.name] = gstatus
@@ -882,14 +889,14 @@ if __name__ == '__main__':
                 gallery.titles.append(title)
 
                 if g.artist:
-                    artist = db.Artist()
+                    artist = None
                     artist_name = db.AliasName()
-                    artist_name.name = g.artist
+                    artist_name.name = g.artist.strip()
                     artist_name.language = db_lang
-                    d_artist = dst_artists.get(artist_name.name)
-                    if not d_artist:
-                        d_artist = artist
-                        artist_name.artist = d_artist
+                    artist = dst_artists.get(artist_name.name)
+                    if not artist:
+                        artist = db.Artist()
+                        artist.names.append(artist_name)
                     gallery.artists.append(artist)
                     dst_artists[artist_name.name] = artist
                 gallery.info = g.info
@@ -924,13 +931,11 @@ if __name__ == '__main__':
             # tags
 
             for ns in g.tags:
-                n = db.Namespace()
-                n.name = constants.special_namespace if ns == 'default' else ns
+                n = db.Namespace(name=constants.special_namespace if ns == 'default' else ns)
                 n = dst_namespace.get(ns, n)
                 dst_namespace[ns] = n
                 for tag in g.tags[ns]:
-                    t = db.Tag()
-                    t.name = tag
+                    t = db.Tag(name=tag)
                     t = dst_tag.get(tag, t)
                     dst_tag[t.name] = t
                     nstagname = ns + tag
@@ -1063,4 +1068,5 @@ if __name__ == '__main__':
     s.commit()
     print("Done!")
 
-
+if __name__ == '__main__':
+    main()

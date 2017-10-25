@@ -1,5 +1,6 @@
 import os
 import sys
+import i18n
 
 if __package__ is None and not hasattr(sys, 'frozen'):
     # direct call of main.py
@@ -10,37 +11,40 @@ from gevent import monkey  # noqa: E402
 
 from multiprocessing import Process  # noqa: E402
 
-from happypanda.common import utils, constants, hlogger  # noqa: E402
+from happypanda.common import utils, constants, hlogger, config  # noqa: E402
 # views need to be imported before starting the webserver in a different process
 from happypanda.core.web import views  # noqa: F401
 from happypanda.core import server, plugins, command, services, db  # noqa: E402
 from happypanda.core.commands import io_cmd  # noqa: E402
 
 log = hlogger.Logger(__name__)
+parser = utils.get_argparser()  # required to be at module lvl for sphinx.autoprogram ext
 
 
-def start(argv=None):
+def start(argv=None, db_kwargs={}):
     if argv is None:
         argv = sys.argv[1:]
-    parser = utils.get_argparser()
     utils.setup_dirs()
     args = parser.parse_args(argv)
     utils.parse_options(args)
 
     if not args.only_web:
-        db.init()
+        db.init(**db_kwargs)
         command.init_commands()
         hlogger.Logger.init_listener(args)
         monkey.patch_all(thread=False)
 
-    hlogger.Logger.setup_logger(args)
+    hlogger.Logger.setup_logger(args, main=True)
+    log.i("HPX SERVER START")
 
-    if args.generate_config:
-        constants.config.save()
-        log.i("Generated configuration file at '{}'".format(io_cmd.CoreFS(constants.settings_file).path), stdout=True)
+    if args.gen_config:
+        config.config.save_default()
+        log.i("Generated example configuration file at {}".format(
+            io_cmd.CoreFS(constants.config_example_path).path), stdout=True)
         return
 
-    log.i("HPX SERVER START")
+    i18n.set("locale", config.translation_locale.value)
+    i18n.set("fallback", config.translation_locale.value)
 
     if not args.only_web:
         constants.available_commands = command.get_available_commands()
@@ -52,8 +56,8 @@ def start(argv=None):
         else:
             plugins.registered.init_plugins()
 
-    log.i("Starting webserver... ({}:{})".format(constants.host_web, constants.port_web), stdout=True)
-    web_args = (constants.host_web, constants.port_web, constants.dev if args.only_web else False)
+    log.i("Starting webserver... ({}:{})".format(config.host_web.value, config.port_web.value), stdout=True)
+    web_args = (config.host_web.value, config.port_web.value, constants.dev if args.only_web else False)
     if args.only_web:
         server.WebServer().run(*web_args)
     else:
@@ -65,7 +69,7 @@ def start(argv=None):
         server.HPServer().run(interactive=args.interact)
 
     if not args.only_web:
-        constants.config.save()
+        config.config.save()
         hlogger.Logger.shutdown_listener()
     log.i("HPX SERVER END")
 
